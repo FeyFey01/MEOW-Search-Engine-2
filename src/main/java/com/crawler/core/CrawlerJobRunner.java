@@ -81,9 +81,19 @@ public class CrawlerJobRunner {
         this.visited = ConcurrentHashMap.newKeySet();
         this.enqueued = ConcurrentHashMap.newKeySet();
         this.visited.addAll(visited);
-        this.frontier.addAll(pending);
+        
+        // Safely add pending tasks; drop extras if queue overflows
+        int droppedCount = 0;
         for (CrawlTask task : pending) {
-            this.enqueued.add(task.getUrl());
+            boolean accepted = this.frontier.offer(task);
+            if (accepted) {
+                this.enqueued.add(task.getUrl());
+            } else {
+                droppedCount++;
+            }
+        }
+        if (droppedCount > 0) {
+            System.err.println("WARN: resume dropped " + droppedCount + " pending tasks (queue capacity=" + queueCapacity + ")");
         }
         this.pagesFetched.set(pagesFetched);
         this.createdAtEpochMs = createdAtEpochMs;

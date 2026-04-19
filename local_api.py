@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -368,7 +369,16 @@ def enforce_max_urls_loop():
                             state["finished"] = True
                             state["stopRequested"] = True
                             state["updatedAtEpochMs"] = int(time.time() * 1000)
-                            state_path.write_text(json.dumps(state), encoding="utf-8")
+                            # Atomic write: temp file + replace
+                            with tempfile.NamedTemporaryFile(
+                                mode="w",
+                                dir=state_path.parent,
+                                delete=False,
+                                encoding="utf-8"
+                            ) as tmp:
+                                json.dump(state, tmp)
+                                tmp_path = tmp.name
+                            os.replace(tmp_path, str(state_path))
                     except Exception:
                         pass
                     append_runtime_log(job_id, f"auto_finish=maxUrls reached ({max_urls})")

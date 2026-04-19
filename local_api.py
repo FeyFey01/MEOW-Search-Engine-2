@@ -366,6 +366,9 @@ def enforce_max_urls_loop():
                     try:
                         state_path = DATA_DIR / job_id / "state.json"
                         if state_path.exists():
+                            # Re-read latest state to avoid overwriting newer JVM checkpoint
+                            fresh = load_job_state(job_id)
+                            state = fresh if fresh else state
                             state["finished"] = True
                             state["stopRequested"] = True
                             state["updatedAtEpochMs"] = int(time.time() * 1000)

@@ -14,6 +14,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -48,6 +50,7 @@ public class CrawlerJobRunner {
     private final Set<String> visited;
     private final Set<String> enqueued;
     private final JsonStores stores;
+    private final Path jvmPidFile;
 
     private final AtomicBoolean stopRequested = new AtomicBoolean(false);
     private final AtomicBoolean finished = new AtomicBoolean(false);
@@ -98,6 +101,7 @@ public class CrawlerJobRunner {
         this.pagesFetched.set(pagesFetched);
         this.createdAtEpochMs = createdAtEpochMs;
         this.stores = new JsonStores(baseDir, jobId);
+        this.jvmPidFile = baseDir.resolve(jobId).resolve("jvm.pid");
     }
 
     public static CrawlerJobRunner startNew(
@@ -143,6 +147,7 @@ public class CrawlerJobRunner {
     }
 
     public void runUntilDone() throws InterruptedException, IOException {
+        writeJvmPidFile();
         persistState();
 
         ScheduledExecutorService checkpointScheduler = Executors.newSingleThreadScheduledExecutor();
@@ -169,6 +174,7 @@ public class CrawlerJobRunner {
                                     try {
                                         requestStop();
                                         persistState();
+                                        deleteJvmPidFile();
                                     } catch (IOException ignored) {
                                     }
                                 }));
@@ -183,58 +189,78 @@ public class CrawlerJobRunner {
             TimeUnit.MILLISECONDS.sleep(200);
         }
 
+        // Freeze scheduler + workers first, then persist final snapshot.
         stopRequested.set(true);
-        workers.shutdown();
-        workers.awaitTermination(30, TimeUnit.SECONDS);
-
-        if (!workers.isTerminated()) {
-            workers.shutdownNow();
-            workers.awaitTermination(10, TimeUnit.SECONDS);
-        }
-
         checkpointScheduler.shutdownNow();
+        workers.shutdownNow();
+        if (!workers.awaitTermination(10, TimeUnit.SECONDS)) {
+            System.err.println("WARN: workers did not terminate within timeout after shutdownNow");
+        }
 
         if (frontier.isEmpty() && inFlight.get() == 0) {
             finished.set(true);
         }
 
         persistState();
+        deleteJvmPidFile();
+    }
+
+    private void writeJvmPidFile() {
+        try {
+            long pid = ProcessHandle.current().pid();
+            Files.createDirectories(jvmPidFile.getParent());
+            Files.writeString(
+                    jvmPidFile,
+                    Long.toString(pid),
+                    StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void deleteJvmPidFile() {
+        try {
+            Files.deleteIfExists(jvmPidFile);
+        } catch (IOException ignored) {
+        }
     }
 
     private void workerLoop() {
-        while (!stopRequested.get()) {
-            CrawlTask task;
-            try {
-                task = frontier.poll(1, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
+        try {
+            while (!stopRequested.get() && !Thread.currentThread().isInterrupted()) {
+                CrawlTask task = frontier.poll(1, TimeUnit.SECONDS);
+                if (task == null) {
+                    continue;
+                }
+                if (stopRequested.get() || Thread.currentThread().isInterrupted()) {
+                    return;
+                }
 
-            if (task == null) {
-                continue;
-            }
+                String normalized = UrlNormalizer.normalize(task.getUrl());
+                if (normalized == null) {
+                    continue;
+                }
+                enqueued.remove(normalized);
 
-            String normalized = UrlNormalizer.normalize(task.getUrl());
-            if (normalized == null) {
-                continue;
-            }
-            enqueued.remove(normalized);
+                if (!visited.add(normalized)) {
+                    continue;
+                }
 
-            if (!visited.add(normalized)) {
-                continue;
+                inFlight.incrementAndGet();
+                try {
+                    processTask(task, normalized);
+                } finally {
+                    inFlight.decrementAndGet();
+                }
             }
-
-            inFlight.incrementAndGet();
-            try {
-                processTask(task, normalized);
-            } finally {
-                inFlight.decrementAndGet();
-            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
     private void processTask(CrawlTask task, String normalizedUrl) {
+        if (stopRequested.get() || Thread.currentThread().isInterrupted()) {
+            return;
+        }
         try {
             HttpRequest request =
                     HttpRequest.newBuilder(URI.create(normalizedUrl))
@@ -245,6 +271,9 @@ public class CrawlerJobRunner {
 
             HttpResponse<String> response =
                     httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (stopRequested.get() || Thread.currentThread().isInterrupted()) {
+                return;
+            }
             if (response.statusCode() >= 400) {
                 return;
             }
@@ -256,6 +285,9 @@ public class CrawlerJobRunner {
             long now = System.currentTimeMillis();
 
             for (Element link : doc.select("a[href]")) {
+                if (stopRequested.get() || Thread.currentThread().isInterrupted()) {
+                    return;
+                }
                 String absolute = link.attr("abs:href");
                 String target = UrlNormalizer.normalize(absolute);
                 if (target == null) {
@@ -283,6 +315,9 @@ public class CrawlerJobRunner {
                 }
             }
 
+            if (stopRequested.get() || Thread.currentThread().isInterrupted()) {
+                return;
+            }
             stores.appendPage(
                     new PageRecord(
                             normalizedUrl,
@@ -293,6 +328,9 @@ public class CrawlerJobRunner {
                             outgoing,
                             task.getDiscoveredBy()));
             for (Map.Entry<String, Integer> entry : wordFrequency.entrySet()) {
+                if (stopRequested.get() || Thread.currentThread().isInterrupted()) {
+                    return;
+                }
                 stores.appendWordIndexRecord(
                         entry.getKey(),
                         normalizedUrl,
@@ -300,7 +338,11 @@ public class CrawlerJobRunner {
                         task.getDepth(),
                         entry.getValue());
             }
-            pagesFetched.incrementAndGet();
+            if (!stopRequested.get() && !Thread.currentThread().isInterrupted()) {
+                pagesFetched.incrementAndGet();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         } catch (Exception ignored) {
         }
     }

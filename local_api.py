@@ -70,6 +70,62 @@ def max_urls_path(job_id: str) -> Path:
     return DATA_DIR / job_id / "max_urls.txt"
 
 
+def runner_pid_path(job_id: str) -> Path:
+    return DATA_DIR / job_id / "runner.pid"
+
+
+def jvm_pid_path(job_id: str) -> Path:
+    return DATA_DIR / job_id / "jvm.pid"
+
+
+def persist_runner_pid(job_id: str, pid: int):
+    p = runner_pid_path(job_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(str(int(pid)), encoding="utf-8")
+
+
+def read_runner_pid(job_id: str):
+    p = runner_pid_path(job_id)
+    if not p.exists():
+        return None
+    try:
+        pid = int(p.read_text(encoding="utf-8").strip())
+        return pid if pid > 0 else None
+    except Exception:
+        return None
+
+
+def clear_runner_pid(job_id: str):
+    p = runner_pid_path(job_id)
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def read_jvm_pid(job_id: str):
+    p = jvm_pid_path(job_id)
+    if not p.exists():
+        return None
+    try:
+        pid = int(p.read_text(encoding="utf-8").strip())
+        return pid if pid > 0 else None
+    except Exception:
+        return None
+
+
+def clear_jvm_pid(job_id: str):
+    p = jvm_pid_path(job_id)
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
 def persist_max_urls(job_id: str, max_urls):
     if max_urls is None:
         return
@@ -136,6 +192,106 @@ def kill_job_process(proc: subprocess.Popen, wait_timeout: float = 10):
         pass
 
 
+def is_pid_running(pid):
+    if pid is None:
+        return False
+    try:
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            output = (completed.stdout or "").strip()
+            # tasklist prints this line when no process matches.
+            if "No tasks are running" in output:
+                return False
+            return str(pid) in output
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def kill_process_by_pid(pid: int):
+    if pid is None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:
+        pass
+
+
+def stop_job_process(job_id: str, proc: subprocess.Popen | None):
+    if proc and proc.poll() is None:
+        kill_job_process(proc)
+        clear_runner_pid(job_id)
+        clear_jvm_pid(job_id)
+        return
+    pids = [read_runner_pid(job_id), read_jvm_pid(job_id)]
+    if all(pid is None for pid in pids):
+        discovered = discover_crawler_process_pids()
+        # Safety: only use heuristic kill when there's exactly one crawler process.
+        if len(discovered) == 1:
+            pids = discovered
+    for pid in pids:
+        if pid is not None:
+            kill_process_by_pid(pid)
+    clear_runner_pid(job_id)
+    clear_jvm_pid(job_id)
+
+
+def discover_crawler_process_pids():
+    try:
+        if os.name == "nt":
+            ps_cmd = (
+                "Get-CimInstance Win32_Process | "
+                "Where-Object { $_.CommandLine -and "
+                "($_.CommandLine -match 'crawler-1.0.0-jar-with-dependencies\\.jar' "
+                "-or $_.CommandLine -match 'main\\.py\\s+(index|resume)') } | "
+                "Select-Object -ExpandProperty ProcessId"
+            )
+            completed = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+            pids = []
+            for line in (completed.stdout or "").splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.append(int(line))
+            return pids
+        completed = subprocess.run(
+            ["ps", "-eo", "pid,args"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        pids = []
+        for line in (completed.stdout or "").splitlines():
+            if "crawler-1.0.0-jar-with-dependencies.jar" in line or re.search(r"main\.py\s+(index|resume)\b", line):
+                parts = line.strip().split(None, 1)
+                if parts and parts[0].isdigit():
+                    pids.append(int(parts[0]))
+        return pids
+    except Exception:
+        return []
+
+
 def start_job_process(command_args, maybe_job_id=None):
     cmd = ["python3", str(MAIN_PY)] + command_args
     popen_kw = dict(
@@ -148,6 +304,8 @@ def start_job_process(command_args, maybe_job_id=None):
     if os.name != "nt":
         popen_kw["start_new_session"] = True
     proc = subprocess.Popen(cmd, **popen_kw)
+    if maybe_job_id:
+        persist_runner_pid(maybe_job_id, proc.pid)
     holder = {"job_id": maybe_job_id}
     lines = []
 
@@ -162,6 +320,7 @@ def start_job_process(command_args, maybe_job_id=None):
                 parsed = parse_job_id_from_output(stripped)
                 if parsed:
                     holder["job_id"] = parsed
+                    persist_runner_pid(parsed, proc.pid)
             active_job_id = holder["job_id"] or maybe_job_id
             if active_job_id:
                 out_path_local = DATA_DIR / active_job_id / "runtime.log"
@@ -176,6 +335,7 @@ def start_job_process(command_args, maybe_job_id=None):
                 if record and record.get("proc") is proc:
                     record["endedAt"] = now_iso()
                     record["exitCode"] = proc.returncode
+            clear_runner_pid(active_job_id)
 
     t = threading.Thread(target=pump, daemon=True)
     t.start()
@@ -188,8 +348,10 @@ def build_status_payload(job_id: str):
         return None
     with JOBS_LOCK:
         running = RUNNING_JOBS.get(job_id)
-        is_running = bool(running and running.get("proc") and running["proc"].poll() is None)
+        tracked_running = bool(running and running.get("proc") and running["proc"].poll() is None)
         inmem_max = running.get("maxUrls") if running else None
+    persisted_pids = [read_runner_pid(job_id), read_jvm_pid(job_id)]
+    is_running = tracked_running or any(is_pid_running(pid) for pid in persisted_pids if pid is not None)
     max_urls = inmem_max if inmem_max is not None else read_persisted_max_urls(job_id)
     reached_cap = bool(max_urls is not None and len(state.get("visited") or []) >= max_urls)
     if is_running:
@@ -368,7 +530,7 @@ def enforce_max_urls_loop():
                         if state_path.exists():
                             # Re-read latest state to avoid overwriting newer JVM checkpoint
                             fresh = load_job_state(job_id)
-                            state = fresh if fresh else state
+                            state = fresh if fresh is not None else state
                             state["finished"] = True
                             state["stopRequested"] = True
                             state["updatedAtEpochMs"] = int(time.time() * 1000)
@@ -592,6 +754,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             while time.time() < deadline and holder["job_id"] is None and proc.poll() is None:
                 time.sleep(0.05)
             if holder["job_id"] is None:
+                kill_job_process(proc)
                 self._json(500, {"error": "Failed to create crawl job", "output": lines[-20:]})
                 return
             with JOBS_LOCK:
@@ -638,6 +801,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 shutil.rmtree(job_dir, ignore_errors=True)
                 with JOBS_LOCK:
                     RUNNING_JOBS.pop(job_id, None)
+                clear_runner_pid(job_id)
+                clear_jvm_pid(job_id)
                 self._json(200, {"jobId": job_id, "action": "delete", "status": "DELETED"})
                 return
 
@@ -645,14 +810,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                 with JOBS_LOCK:
                     rec = RUNNING_JOBS.get(job_id)
                     proc = rec.get("proc") if rec else None
-                if proc and proc.poll() is None:
-                    kill_job_process(proc)
+                stop_job_process(job_id, proc)
                 append_runtime_log(job_id, "manual_cancel_requested -> deleting job files")
                 job_dir = DATA_DIR / job_id
                 if job_dir.exists():
                     shutil.rmtree(job_dir, ignore_errors=True)
                 with JOBS_LOCK:
                     RUNNING_JOBS.pop(job_id, None)
+                clear_runner_pid(job_id)
+                clear_jvm_pid(job_id)
                 self._json(200, {"jobId": job_id, "action": "cancel", "status": "DELETED"})
                 return
 
@@ -660,8 +826,26 @@ class ApiHandler(BaseHTTPRequestHandler):
                 with JOBS_LOCK:
                     rec = RUNNING_JOBS.get(job_id)
                     proc = rec.get("proc") if rec else None
-                if proc and proc.poll() is None:
-                    kill_job_process(proc)
+                stop_job_process(job_id, proc)
+                # Update state after shutdown
+                try:
+                    state_path = DATA_DIR / job_id / "state.json"
+                    if state_path.exists():
+                        fresh = load_job_state(job_id)
+                        state = fresh if fresh is not None else {}
+                        state["stopRequested"] = True
+                        state["updatedAtEpochMs"] = int(time.time() * 1000)
+                        with tempfile.NamedTemporaryFile(
+                            mode="w",
+                            dir=state_path.parent,
+                            delete=False,
+                            encoding="utf-8"
+                        ) as tmp:
+                            json.dump(state, tmp)
+                            tmp_path = tmp.name
+                        os.replace(tmp_path, str(state_path))
+                except Exception:
+                    pass
                 append_runtime_log(job_id, f"manual_{action}_requested")
                 self._json(200, {"jobId": job_id, "action": action, "status": "STOPPED"})
                 return

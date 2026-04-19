@@ -132,6 +132,7 @@ Core components:
 - Must support graceful interrupt handling
 - On shutdown signal, in-flight progress should be checkpointed
 - Job status must transition to a terminal or resumable state
+- Final persisted state must be written only after worker termination is completed (or force-terminated timeout path is reached), to avoid state/output drift after stop/pause
 
 ---
 

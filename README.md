@@ -148,6 +148,16 @@ Contents:
 * `p.data` — inverted index
 * `state.json` — crawl state
 * `runtime.log` — logs
+* `runner.pid` — API-managed runner process PID (when available)
+* `jvm.pid` — crawler JVM PID for resilient stop/pause handling
+
+### Stop/Pause consistency note
+
+Recent fixes harden stop/pause behavior:
+
+* worker shutdown now uses interrupt-aware termination before final state persist
+* stop/pause can fall back to persisted PID-based process termination
+* goal is to prevent counters (word/page) from increasing after job is stopped
 
 ---
 

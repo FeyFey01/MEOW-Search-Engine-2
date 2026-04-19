@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Search</title>
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap">
+      <h1 class="title">
+        <a class="title-link app-logo" href="./search.html" aria-label="Go to search">
+          <img class="navbar-logo" src="./navbar_logo.png" alt="Logo">
+        </a>
+      </h1>
+      <nav class="nav">
+        <a href="./crawler.html">Create</a>
+        <a href="./status.html">Crawlers</a>
+        <a class="active" href="./search.html">Search</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap search-layout">
+    <section class="search-hero">
+      <img class="meow-logo-image" src="./logo.png" alt="Search logo">
+      <div class="search-row">
+        <input id="query" class="search-input" placeholder="One word only (e.g. cat)">
+        <select id="sortBy" class="search-sort">
+          <option value="relevance">relevance</option>
+          <option value="frequency">frequency</option>
+          <option value="depth">depth</option>
+        </select>
+      </div>
+      <div class="actions search-actions" style="margin-top:10px;">
+        <button class="btn-primary" id="searchBtn">Search</button>
+        <button id="luckyBtn">I'm feeling lucky</button>
+      </div>
+      <p class="small">Exact word matching only. "cat" does not match "catastrophe".</p>
+    </section>
+
+    <section class="panel" style="margin-top:12px;">
+      <h3>Results</h3>
+      <div id="resultInfo" class="small">No search yet.</div>
+      <div id="results"></div>
+      <div id="meowPager" class="meow-pager" style="margin-top:12px;"></div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+  <script>
+    let page = 1;
+    const pageSize = 10;
+    let lastResults = [];
+    let lastQuery = "";
+    let totalPages = 1;
+
+    function renderResults(items) {
+      const container = document.getElementById("results");
+      container.innerHTML = "";
+      if (!items || items.length === 0) {
+        container.textContent = "No results.";
+        return;
+      }
+      items.forEach(r => {
+        const row = document.createElement("div");
+        row.className = "result";
+        row.innerHTML = `
+          <div class="result-head">
+            <a class="truncated-link result-link" href="${r.url || "#"}" target="_blank" rel="noopener noreferrer">${r.url || "-"}</a>
+            <button type="button" class="details-toggle icon-only" aria-label="Show details" title="Show details" onclick="openResultDetails(this)">i</button>
+          </div>
+          <div hidden class="result-details small">
+            <div><strong>Score:</strong> ${r.score}</div>
+            <div><strong>Frequency:</strong> ${r.frequency}</div>
+            <div><strong>Depth:</strong> ${r.depth}</div>
+            <div><strong>Origin:</strong> <a class="truncated-link" href="${r.originUrl || "#"}" target="_blank" rel="noopener noreferrer">${r.originUrl || "-"}</a></div>
+            <div><strong>Formula:</strong> freq(${r.frequency} x 10) + exact(1000) - depth(${r.depth} x 5)</div>
+          </div>
+        `;
+        container.appendChild(row);
+      });
+    }
+
+    async function doSearch() {
+      const q = document.getElementById("query").value.trim();
+      if (!q) return;
+      lastQuery = q;
+      const sortBy = document.getElementById("sortBy").value;
+      try {
+        const data = await callApi(`/api/search?q=${encodeURIComponent(q)}&page=${page}&size=${pageSize}&sort=${sortBy}`);
+        lastResults = data.results || [];
+        totalPages = Math.max(1, Math.ceil(Number(data.total || 0) / pageSize));
+        if (page > totalPages) page = totalPages;
+        renderResults(lastResults);
+        renderMeowPager();
+        document.getElementById("resultInfo").textContent =
+          `page=${page} | total=${data.total ?? "?"} | query="${q}"`;
+      } catch (err) {
+        document.getElementById("resultInfo").textContent = `Search failed: ${err.message}`;
+        renderResults([]);
+        document.getElementById("meowPager").innerHTML = "";
+      }
+    }
+
+    function renderMeowPager() {
+      const pager = document.getElementById("meowPager");
+      pager.innerHTML = "";
+      if (totalPages <= 1) return;
+      const maxOs = 8;
+      const firstPage = Math.max(1, page - Math.floor(maxOs / 2));
+      const lastPage = Math.min(totalPages, firstPage + maxOs - 1);
+      const startPage = Math.max(1, lastPage - maxOs + 1);
+      ["M", "E"].forEach(ch => {
+        const s = document.createElement("span");
+        s.className = "meow-fixed";
+        s.textContent = ch;
+        pager.appendChild(s);
+      });
+      for (let p = startPage; p <= lastPage; p += 1) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "meow-o" + (p === page ? " active" : "");
+        btn.textContent = "O";
+        btn.title = `Go to page ${p}`;
+        btn.setAttribute("aria-label", `Go to page ${p}`);
+        btn.addEventListener("click", () => {
+          page = p;
+          doSearch();
+        });
+        pager.appendChild(btn);
+      }
+      const w = document.createElement("span");
+      w.className = "meow-fixed";
+      w.textContent = "W";
+      pager.appendChild(w);
+    }
+
+    function lucky() {
+      callApi("/api/search/random-word")
+        .then((data) => {
+          if (!data || !data.word) return;
+          document.getElementById("query").value = data.word;
+          page = 1;
+          doSearch();
+        })
+        .catch(() => {});
+    }
+
+    document.getElementById("searchBtn").addEventListener("click", doSearch);
+    document.getElementById("luckyBtn").addEventListener("click", lucky);
+    document.getElementById("query").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") doSearch();
+    });
+    setInterval(() => {
+      if (!lastQuery) return;
+      if (!hasActiveCrawlerFlag()) return;
+      doSearch();
+    }, 1000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crawlers</title>
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap">
+      <h1 class="title">
+        <a class="title-link app-logo" href="./search.html" aria-label="Go to search">
+          <img class="navbar-logo" src="./navbar_logo.png" alt="Logo">
+        </a>
+      </h1>
+      <nav class="nav">
+        <a href="./crawler.html">Create</a>
+        <a class="active" href="./status.html">Crawlers</a>
+        <a href="./search.html">Search</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="panel">
+      <h2>All Crawlers</h2>
+      <p class="small">Running, stopped, and finished crawlers are listed automatically.</p>
+      <div class="actions">
+        <button id="refreshAll">Refresh crawlers</button>
+      </div>
+      <div id="crawlerCards" class="card-grid" style="margin-top:12px;">
+        <div class="small">Loading crawlers...</div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:12px;">
+      <h3>Live Job State</h3>
+      <p>Status: <span id="jobStatus" class="badge">UNKNOWN</span></p>
+      <div class="grid">
+        <div class="metric"><div class="k">Origin URL</div><div class="v" id="originUrl" style="font-size:14px;">-</div></div>
+        <div class="metric"><div class="k">Max depth</div><div class="v" id="maxDepth">-</div></div>
+        <div class="metric"><div class="k">Hit rate</div><div class="v" id="hitRate">-</div></div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:12px;">
+      <h3>Runtime Metrics</h3>
+      <div class="grid">
+        <div class="metric"><div class="k">URLs visited</div><div class="v" id="urlsVisited">-</div></div>
+        <div class="metric"><div class="k">Queue size</div><div class="v" id="queueSize">-</div></div>
+        <div class="metric"><div class="k">Start time</div><div class="v" id="startTime" style="font-size:14px;">-</div></div>
+        <div class="metric"><div class="k">Last update</div><div class="v" id="lastUpdate" style="font-size:14px;">-</div></div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:12px;">
+      <h3>Current Queue (BFS Frontier)</h3>
+      <ul id="queueList" class="list">
+        <li>No queue snapshot loaded.</li>
+      </ul>
+    </section>
+
+    <section class="panel" style="margin-top:12px;">
+      <h3>Crawler Logs</h3>
+      <textarea id="logs" readonly></textarea>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+  <script>
+    let selectedCrawlerId = "";
+    let allCrawlers = [];
+
+    function safe(v) {
+      return String(v ?? "-");
+    }
+
+    function setOriginLink(url) {
+      const el = document.getElementById("originUrl");
+      if (!el) return;
+      const value = String(url || "").trim();
+      if (!value) {
+        el.textContent = "-";
+        return;
+      }
+      el.innerHTML = `<a class="truncated-link" href="${value}" target="_blank" rel="noopener noreferrer">${value}</a>`;
+    }
+
+    function activeId() {
+      return selectedCrawlerId;
+    }
+
+    function renderCards() {
+      const container = document.getElementById("crawlerCards");
+      container.innerHTML = "";
+      if (!allCrawlers.length) {
+        container.innerHTML = '<div class="small">No crawlers found yet. Create one from the Create page.</div>';
+        return;
+      }
+      allCrawlers.forEach(c => {
+        const card = document.createElement("div");
+        card.className = "crawler-card";
+        card.dataset.id = c.jobId;
+        const status = String(c.status || "").toUpperCase();
+        const isRunning = status === "RUNNING";
+        const isFinished = status === "FINISHED";
+        const isPaused = status === "STOPPED" || status === "IDLE";
+        card.innerHTML = `
+          <div class="top">
+            <span class="id-pill">${c.jobId}</span>
+            <span class="badge ${String(c.status || "unknown").toLowerCase()}">${safe(c.status)}</span>
+          </div>
+          <div class="small"><strong>Origin:</strong> <a class="truncated-link" href="${safe(c.originUrl)}" target="_blank" rel="noopener noreferrer">${safe(c.originUrl)}</a></div>
+          <div class="small"><strong>Visited:</strong> ${safe(c.urlsVisited)} | <strong>Queue:</strong> ${safe(c.queueSize)}</div>
+          <div class="small"><strong>Words:</strong> ${safe(c.wordCount)} | <strong>Pages:</strong> ${safe(c.pagesCount)}</div>
+          <div class="small"><strong>Max URLs:</strong> ${safe(c.maxUrls)}</div>
+          <div class="small"><strong>Depth:</strong> ${safe(c.maxDepth)} | <strong>Workers:</strong> ${safe(c.hitRatePerSec)}</div>
+          <div class="small"><strong>Updated:</strong> ${safe(c.lastUpdateTime)}</div>
+          <div class="actions" style="margin-top:10px;">
+            ${isRunning
+              ? `<button data-action="pause" data-id="${c.jobId}" class="btn-pause">Pause</button><button data-action="cancel" data-id="${c.jobId}" class="btn-danger">Cancel</button>`
+              : (isFinished
+                ? `<button data-action="delete" data-id="${c.jobId}" class="btn-danger">Delete</button>`
+                : (isPaused
+                  ? `<button data-action="resume" data-id="${c.jobId}" class="btn-success">Resume</button><button data-action="delete" data-id="${c.jobId}" class="btn-danger">Delete</button>`
+                  : `<button data-action="delete" data-id="${c.jobId}" class="btn-danger">Delete</button>`))}
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    async function loadStatus() {
+      const id = activeId();
+      if (!id) {
+        setBadge("jobStatus", "UNKNOWN");
+        return;
+      }
+      try {
+        const s = await callApi(`/api/crawlers/${id}/status`);
+        setBadge("jobStatus", s.status);
+        setOriginLink(s.originUrl);
+        setText("maxDepth", s.maxDepth);
+        setText("hitRate", s.hitRatePerSec);
+        setText("urlsVisited", s.urlsVisited);
+        setText("queueSize", s.queueSize);
+        setText("startTime", s.startTime);
+        setText("lastUpdate", s.lastUpdateTime);
+      } catch (err) {
+        setBadge("jobStatus", "UNKNOWN");
+      }
+      try {
+        const q = await callApi(`/api/crawlers/${id}/queue`);
+        const list = document.getElementById("queueList");
+        list.innerHTML = "";
+        if (!q.items || q.items.length === 0) {
+          list.innerHTML = "<li>Queue is empty.</li>";
+        } else {
+          q.items.slice(0, 100).forEach(item => {
+            const li = document.createElement("li");
+            li.textContent = `${item.url} (depth=${item.depth})`;
+            list.appendChild(li);
+          });
+        }
+      } catch (err) {
+        document.getElementById("queueList").innerHTML = "<li>Queue endpoint not available.</li>";
+      }
+      try {
+        const logs = await callApi(`/api/crawlers/${id}/logs`);
+        document.getElementById("logs").value = (logs.lines || []).join("\n");
+      } catch (err) {
+        document.getElementById("logs").value = "Log endpoint not available.";
+      }
+    }
+
+    async function loadAllCrawlers() {
+      try {
+        const data = await callApi("/api/crawlers");
+        allCrawlers = data.crawlers || [];
+        setActiveCrawlerFlag(allCrawlers.some(c => String(c.status || "").toUpperCase() === "RUNNING"));
+        renderCards();
+        if (!selectedCrawlerId && allCrawlers.length) {
+          selectedCrawlerId = allCrawlers[0].jobId;
+          await loadStatus();
+        }
+        if (selectedCrawlerId && !allCrawlers.some(c => c.jobId === selectedCrawlerId)) {
+          selectedCrawlerId = allCrawlers[0] ? allCrawlers[0].jobId : "";
+          if (selectedCrawlerId) await loadStatus();
+        }
+      } catch (err) {
+        document.getElementById("crawlerCards").innerHTML = '<div class="small">Failed to load crawlers.</div>';
+      }
+    }
+
+    function hasActiveCrawler() {
+      return allCrawlers.some(c => String(c.status || "").toUpperCase() === "RUNNING");
+    }
+
+    async function command(action) {
+      const id = activeId();
+      if (!id) return;
+      try {
+        await callApi(`/api/crawlers/${id}/${action}`, { method: "POST" });
+        await loadAllCrawlers();
+        if (action === "cancel" || action === "delete") {
+          selectedCrawlerId = allCrawlers[0] ? allCrawlers[0].jobId : "";
+          if (!selectedCrawlerId) {
+            setBadge("jobStatus", "UNKNOWN");
+            document.getElementById("originUrl").textContent = "-";
+            setText("maxDepth", "-");
+            setText("hitRate", "-");
+            setText("urlsVisited", "-");
+            setText("queueSize", "-");
+            setText("startTime", "-");
+            setText("lastUpdate", "-");
+            document.getElementById("queueList").innerHTML = "<li>No crawlers.</li>";
+            document.getElementById("logs").value = "";
+            return;
+          }
+        }
+        await loadStatus();
+      } catch (err) {
+        document.getElementById("logs").value = `Command failed: ${err.message}`;
+      }
+    }
+
+    document.getElementById("refreshAll").addEventListener("click", async () => {
+      await loadAllCrawlers();
+      await loadStatus();
+    });
+
+    document.getElementById("crawlerCards").addEventListener("click", async (event) => {
+      const btn = event.target.closest("button[data-action]");
+      if (!btn) {
+        const card = event.target.closest(".crawler-card");
+        if (!card || !card.dataset.id) return;
+        selectedCrawlerId = card.dataset.id;
+        await loadStatus();
+        return;
+      }
+      const action = btn.dataset.action;
+      const id = btn.dataset.id;
+      if (!id) return;
+      selectedCrawlerId = id;
+      if (action === "delete") {
+        if (!confirm(`Delete crawler ${id} and all files?`)) return;
+      }
+      if (action === "cancel") {
+        if (!confirm(`Cancel will stop and permanently delete crawler ${id} and all files. Continue?`)) return;
+      }
+      await command(action);
+    });
+
+    loadAllCrawlers();
+
+    setInterval(async () => {
+      if (!hasActiveCrawlerFlag()) return;
+      await loadAllCrawlers();
+      if (!hasActiveCrawler()) return;
+      const id = activeId();
+      if (!id) return;
+      try {
+        const s = await callApi(`/api/crawlers/${id}/status`);
+        setBadge("jobStatus", s.status);
+        setOriginLink(s.originUrl);
+        setText("maxDepth", s.maxDepth);
+        setText("hitRate", s.hitRatePerSec);
+        setText("urlsVisited", s.urlsVisited);
+        setText("queueSize", s.queueSize);
+        setText("startTime", s.startTime);
+        setText("lastUpdate", s.lastUpdateTime);
+      } catch (err) {}
+    }, 1000);
+
+    setInterval(async () => {
+      if (!hasActiveCrawlerFlag()) return;
+      if (!hasActiveCrawler()) return;
+      const id = activeId();
+      if (!id) return;
+      try {
+        const q = await callApi(`/api/crawlers/${id}/queue`);
+        const list = document.getElementById("queueList");
+        list.innerHTML = "";
+        if (!q.items || q.items.length === 0) {
+          list.innerHTML = "<li>Queue is empty.</li>";
+        } else {
+          q.items.slice(0, 100).forEach(item => {
+            const li = document.createElement("li");
+            li.textContent = `${item.url} (depth=${item.depth})`;
+            list.appendChild(li);
+          });
+        }
+      } catch (err) {}
+      try {
+        const logs = await callApi(`/api/crawlers/${id}/logs`);
+        document.getElementById("logs").value = (logs.lines || []).join("\n");
+      } catch (err) {}
+    }, 3000);
+  </script>
+</body>
+</html>

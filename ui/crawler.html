@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Create crawler</title>
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap">
+      <h1 class="title">
+        <a class="title-link app-logo" href="./search.html" aria-label="Go to search">
+          <img class="navbar-logo" src="./navbar_logo.png" alt="Logo">
+        </a>
+      </h1>
+      <nav class="nav">
+        <a class="active" href="./crawler.html">Create</a>
+        <a href="./status.html">Crawlers</a>
+        <a href="./search.html">Search</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="panel">
+      <h2>Create crawler</h2>
+      <div class="row">
+        <div>
+          <label for="originUrl">Origin URL</label>
+          <input id="originUrl" value="https://www.wikipedia.org/" placeholder="https://example.com">
+        </div>
+        <div>
+          <label for="maxDepth">Max depth (k)</label>
+          <input id="maxDepth" type="number" value="2" min="0" max="6">
+        </div>
+      </div>
+      <div class="row-3" style="margin-top:10px;">
+        <div>
+          <label for="hitRate">Hit rate (/sec)</label>
+          <input id="hitRate" type="number" value="4" min="1" max="32">
+        </div>
+        <div>
+          <label for="queueCapacity">Queue capacity</label>
+          <input id="queueCapacity" type="number" value="1000" min="50" max="20000">
+        </div>
+        <div>
+          <label for="maxUrls">Max URLs to visit (optional)</label>
+          <input id="maxUrls" type="number" min="1" max="1000000" placeholder="leave empty for no cap">
+        </div>
+      </div>
+      <div class="actions" style="margin-top:12px;">
+        <button class="btn-primary" id="createBtn">Create crawler</button>
+      </div>
+      <p class="small" id="createInfo">Fill fields and create crawler.</p>
+    </section>
+
+    <section class="panel" style="margin-top:12px;">
+      <h3>Global System Stats</h3>
+      <div class="grid">
+        <div class="metric"><div class="k">URLs visited</div><div class="v" id="mVisited">-</div></div>
+        <div class="metric"><div class="k">Words in DB</div><div class="v" id="mWords">-</div></div>
+        <div class="metric"><div class="k">Active crawlers</div><div class="v" id="mActive">-</div></div>
+        <div class="metric"><div class="k">Total created</div><div class="v" id="mTotal">-</div></div>
+      </div>
+      <div class="actions" style="margin-top:12px;">
+        <button id="refreshMetrics">Refresh metrics</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+  <script>
+    let latestStats = null;
+
+    async function loadGlobalStats() {
+      try {
+        const data = await callApi("/api/stats/global");
+        latestStats = data;
+        setActiveCrawlerFlag(Number(data.activeCrawlers || 0) > 0);
+        setText("mVisited", data.urlsVisited);
+        setText("mWords", data.wordsInDb);
+        setText("mActive", data.activeCrawlers);
+        setText("mTotal", data.totalCreatedCrawlers);
+      } catch (err) {
+        setActiveCrawlerFlag(false);
+        setText("mVisited", "n/a");
+        setText("mWords", "n/a");
+        setText("mActive", "n/a");
+        setText("mTotal", "n/a");
+      }
+    }
+
+    async function createJob() {
+      const depth = Number(document.getElementById("maxDepth").value);
+      const hitRate = Number(document.getElementById("hitRate").value);
+      const queueCapacity = Number(document.getElementById("queueCapacity").value);
+      const maxUrlsRaw = document.getElementById("maxUrls").value.trim();
+      const maxUrlsNum = maxUrlsRaw === "" ? null : Number(maxUrlsRaw);
+      if (depth < 0 || depth > 6) {
+        document.getElementById("createInfo").textContent = "Max depth must be between 0 and 6.";
+        return;
+      }
+      if (hitRate < 1 || hitRate > 32) {
+        document.getElementById("createInfo").textContent = "Hit rate must be between 1 and 32.";
+        return;
+      }
+      if (queueCapacity < 50 || queueCapacity > 20000) {
+        document.getElementById("createInfo").textContent = "Queue capacity must be between 50 and 20000.";
+        return;
+      }
+      if (maxUrlsNum !== null && (maxUrlsNum < 1 || maxUrlsNum > 1000000)) {
+        document.getElementById("createInfo").textContent = "Max URLs must be between 1 and 1000000.";
+        return;
+      }
+      const payload = {
+        seedUrl: document.getElementById("originUrl").value.trim(),
+        depthLimit: depth,
+        hitRatePerSec: hitRate,
+        queueCapacity: queueCapacity,
+        maxUrls: maxUrlsNum
+      };
+      try {
+        const data = await callApi("/api/crawlers", { method: "POST", body: JSON.stringify(payload) });
+        setActiveCrawlerFlag(true);
+        document.getElementById("createInfo").textContent =
+          `Crawler created successfully. jobId=${data.jobId} | state=${data.initialState} | startedAt=${data.startTimestamp}`;
+      } catch (err) {
+        document.getElementById("createInfo").textContent = `Create crawler failed: ${err.message}`;
+      }
+    }
+
+    document.getElementById("refreshMetrics").addEventListener("click", loadGlobalStats);
+    document.getElementById("createBtn").addEventListener("click", createJob);
+    loadGlobalStats();
+    setInterval(() => {
+      if (hasActiveCrawlerFlag()) loadGlobalStats();
+    }, 1000);
+  </script>
+</body>
+</html>
